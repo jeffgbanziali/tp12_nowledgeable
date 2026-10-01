@@ -151,46 +151,129 @@ jobs:
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
 
-  # ========================================================
+    # ========================================================
   # JOB 4 : Déploiement sur la VM Azure
   # ========================================================
   deploy:
     name: 4 - Déploiement VM
     runs-on: self-hosted
     needs: build-and-push
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Copie des fichiers de configuration sur la VM
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          password: ${{ secrets.VM_PASSWORD }}
-          source: "docker-compose.prod.yml,init.sql"
-          target: "clienthub-8013"
+      # ----------------------------------------------------
+      # Préparer la clé SSH
+      # ----------------------------------------------------
+      - name: Préparer la clé SSH
+        shell: powershell
+        env:
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+        run: |
+          $sshDir = "$env:USERPROFILE\.ssh"
+          $keyPath = "$sshDir\clienthub_deploy"
 
-      - name: Déploiement via SSH et vérification
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          password: ${{ secrets.VM_PASSWORD }}
-          envs: GITHUB_SHA
-          script: |
-            cd clienthub-8013
-            cat << 'EOF' > .env
-            DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
-            IMAGE_TAG=${GITHUB_SHA}
-            APP_PORT=8013
-            DB_PASSWORD=${{ secrets.DB_PASSWORD }}
-            DB_ROOT_PASSWORD=${{ secrets.DB_ROOT_PASSWORD }}
-            EOF
-            chmod 600 .env
-            docker compose -f docker-compose.prod.yml pull
-            docker compose -f docker-compose.prod.yml up -d --remove-orphans
-            
-            # Vérification des endpoints
-            curl -fsS --retry 10 --retry-delay 3 http://localhost:8013/health
-            curl -fsS http://localhost:8013/who
-            curl -fsS http://localhost:8013/clients
+          New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
+
+          Set-Content `
+            -Path $keyPath `
+            -Value $env:VM_SSH_KEY `
+            -NoNewline
+
+          icacls $keyPath /inheritance:r
+          icacls $keyPath /grant:r "$env:USERNAME:(R)"
+
+          Write-Host "Clé SSH préparée."
+
+      # ----------------------------------------------------
+      # Copier les fichiers sur la VM Azure
+      # ----------------------------------------------------
+      - name: Copier les fichiers sur la VM
+        shell: powershell
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+        run: |
+          $keyPath = "$env:USERPROFILE\.ssh\clienthub_deploy"
+
+          ssh `
+            -i $keyPath `
+            -o StrictHostKeyChecking=no `
+            "${env:VM_USER}@${env:VM_HOST}" `
+            "mkdir -p clienthub-8013"
+
+          scp `
+            -i $keyPath `
+            -o StrictHostKeyChecking=no `
+            docker-compose.prod.yml `
+            init.sql `
+            "${env:VM_USER}@${env:VM_HOST}:clienthub-8013/"
+
+          Write-Host "Fichiers copiés sur la VM."
+
+      # ----------------------------------------------------
+      # Déployer l'application
+      # ----------------------------------------------------
+      - name: Déployer sur la VM
+        shell: powershell
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          GITHUB_SHA: ${{ github.sha }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_ROOT_PASSWORD: ${{ secrets.DB_ROOT_PASSWORD }}
+        run: |
+          $keyPath = "$env:USERPROFILE\.ssh\clienthub_deploy"
+
+          $remoteScript = @"
+          cd clienthub-8013
+
+          cat > .env <<'EOF'
+          DOCKERHUB_USERNAME=$env:DOCKERHUB_USERNAME
+          IMAGE_TAG=$env:GITHUB_SHA
+          APP_PORT=8013
+          DB_PASSWORD=$env:DB_PASSWORD
+          DB_ROOT_PASSWORD=$env:DB_ROOT_PASSWORD
+          EOF
+
+          chmod 600 .env
+
+          docker compose -f docker-compose.prod.yml pull
+          docker compose -f docker-compose.prod.yml up -d --remove-orphans
+
+          echo "Attente du démarrage de l'API..."
+
+          curl -fsS --retry 10 --retry-delay 3 http://localhost:8013/health
+
+          echo ""
+          echo "Test /who..."
+          curl -fsS http://localhost:8013/who
+
+          echo ""
+          echo "Test /clients..."
+          curl -fsS http://localhost:8013/clients
+
+          echo ""
+          echo "Déploiement terminé avec succès."
+          "@
+
+          $remoteScript | ssh `
+            -i $keyPath `
+            -o StrictHostKeyChecking=no `
+            "${env:VM_USER}@${env:VM_HOST}" `
+            "bash -s"
+
+      # ----------------------------------------------------
+      # Nettoyage de la clé privée
+      # ----------------------------------------------------
+      - name: Supprimer la clé SSH temporaire
+        if: always()
+        shell: powershell
+        run: |
+          $keyPath = "$env:USERPROFILE\.ssh\clienthub_deploy"
+
+          if (Test-Path $keyPath) {
+            Remove-Item -Force $keyPath
+            Write-Host "Clé SSH temporaire supprimée."
+          }
