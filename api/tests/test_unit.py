@@ -48,6 +48,11 @@ def fake_db(monkeypatch):
     return conn
 
 
+def test_who(client):
+    response = client.get("/who")
+    assert response.status_code == 200
+    assert response.get_data(as_text=True) == f"{api_module.FIRST_NAME} {api_module.LAST_NAME}"
+
 def test_health(client):
     response = client.get("/health")
     assert response.status_code == 200

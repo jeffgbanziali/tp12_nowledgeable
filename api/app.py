@@ -6,6 +6,10 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
+FIRST_NAME = "Jeff"
+LAST_NAME = "GBANZIALI WISSANGA"
+
+
 DB_HOST = os.getenv("DB_HOST", "db")
 DB_PORT = int(os.getenv("DB_PORT", "3306"))
 DB_NAME = os.getenv("DB_NAME", "clienthub")
@@ -79,6 +83,10 @@ def add_client():
             return jsonify({"id": cur.lastrowid, "name": name}), 201
     finally:
         conn.close()
+        
+@app.route("/who")
+def who():
+    return f"{FIRST_NAME} {LAST_NAME}"
 
 
 if __name__ == "__main__":

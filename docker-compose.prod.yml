@@ -1,0 +1,62 @@
+name: clienthub
+
+services:
+  db:
+    image: mysql:8.0
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    container_name: clienthub-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD manquant}
+      MYSQL_DATABASE: clienthub
+      MYSQL_USER: clienthub_user
+      MYSQL_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD manquant}
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - clienthub-net
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  api:
+    image: ${DOCKERHUB_USERNAME:?DOCKERHUB_USERNAME manquant}/clienthub-api:${IMAGE_TAG:-latest}
+    container_name: clienthub-api
+    restart: unless-stopped
+    environment:
+      DB_HOST: db
+      DB_PORT: "3306"
+      DB_NAME: clienthub
+      DB_USER: clienthub_user
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD manquant}
+    ports:
+      - "5000:5000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - clienthub-net
+
+  web:
+    image: nginx:alpine
+    container_name: clienthub-web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./site:/usr/share/nginx/html:ro
+    depends_on:
+      - api
+    networks:
+      - clienthub-net
+
+networks:
+  clienthub-net:
+    driver: bridge
+
+volumes:
+  db_data:

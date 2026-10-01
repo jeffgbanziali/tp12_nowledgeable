@@ -1,9 +1,10 @@
+import os
 import uuid
 
 import pytest
 import requests
 
-BASE_URL = "http://localhost:5000"
+BASE_URL = os.getenv("API_URL", "http://localhost:5000")
 
 pytestmark = pytest.mark.integration
 
@@ -13,7 +14,15 @@ def stack_disponible():
     try:
         requests.get(f"{BASE_URL}/health", timeout=3)
     except requests.exceptions.RequestException:
+        if os.getenv("API_URL"):  # en CI : l'API doit etre joignable
+            pytest.fail("API injoignable")
         pytest.skip("Stack Docker non demarree (lancer: docker compose up -d)")
+
+
+def test_who():
+    r = requests.get(f"{BASE_URL}/who", timeout=5)
+    assert r.status_code == 200
+    assert r.text.strip() != ""
 
 
 def test_health():
