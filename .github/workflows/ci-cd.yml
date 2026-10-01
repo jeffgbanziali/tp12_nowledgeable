@@ -170,23 +170,39 @@ jobs:
         env:
           VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
         run: |
-          $sshDir = "$env:USERPROFILE\.ssh"
-          $keyPath = "$sshDir\clienthub_deploy"
+          $sshDir = Join-Path $env:USERPROFILE ".ssh"
+          $keyPath = Join-Path $sshDir "clienthub_deploy"
 
           New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
 
           Set-Content `
             -Path $keyPath `
             -Value $env:VM_SSH_KEY `
-            -NoNewline
+            -NoNewline `
+            -Encoding ascii
 
-          icacls $keyPath /inheritance:r
-          icacls $keyPath /grant:r "$env:USERNAME:(R)"
-
-          Write-Host "Clé SSH préparée."
+          Write-Host "Clé SSH préparée : $keyPath"
 
       # ----------------------------------------------------
-      # Copier les fichiers sur la VM Azure
+      # Tester la connexion SSH
+      # ----------------------------------------------------
+      - name: Tester la connexion SSH
+        shell: powershell
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+        run: |
+          $keyPath = Join-Path $env:USERPROFILE ".ssh\clienthub_deploy"
+
+          ssh `
+            -i $keyPath `
+            -o StrictHostKeyChecking=no `
+            -o BatchMode=yes `
+            "${env:VM_USER}@${env:VM_HOST}" `
+            "echo SSH_OK"
+
+      # ----------------------------------------------------
+      # Créer le dossier et copier les fichiers
       # ----------------------------------------------------
       - name: Copier les fichiers sur la VM
         shell: powershell
@@ -194,11 +210,12 @@ jobs:
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_USER: ${{ secrets.VM_USER }}
         run: |
-          $keyPath = "$env:USERPROFILE\.ssh\clienthub_deploy"
+          $keyPath = Join-Path $env:USERPROFILE ".ssh\clienthub_deploy"
 
           ssh `
             -i $keyPath `
             -o StrictHostKeyChecking=no `
+            -o BatchMode=yes `
             "${env:VM_USER}@${env:VM_HOST}" `
             "mkdir -p clienthub-8013"
 
@@ -224,7 +241,7 @@ jobs:
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_ROOT_PASSWORD: ${{ secrets.DB_ROOT_PASSWORD }}
         run: |
-          $keyPath = "$env:USERPROFILE\.ssh\clienthub_deploy"
+          $keyPath = Join-Path $env:USERPROFILE ".ssh\clienthub_deploy"
 
           $remoteScript = @"
           cd clienthub-8013
@@ -239,10 +256,13 @@ jobs:
 
           chmod 600 .env
 
+          echo "Pull de l'image Docker..."
           docker compose -f docker-compose.prod.yml pull
+
+          echo "Démarrage de la stack..."
           docker compose -f docker-compose.prod.yml up -d --remove-orphans
 
-          echo "Attente du démarrage de l'API..."
+          echo "Vérification de l'API..."
 
           curl -fsS --retry 10 --retry-delay 3 http://localhost:8013/health
 
@@ -255,25 +275,34 @@ jobs:
           curl -fsS http://localhost:8013/clients
 
           echo ""
-          echo "Déploiement terminé avec succès."
+          echo "========================================"
+          echo "DEPLOIEMENT TERMINE AVEC SUCCES"
+          echo "========================================"
           "@
 
           $remoteScript | ssh `
             -i $keyPath `
             -o StrictHostKeyChecking=no `
+            -o BatchMode=yes `
             "${env:VM_USER}@${env:VM_HOST}" `
             "bash -s"
 
       # ----------------------------------------------------
-      # Nettoyage de la clé privée
+      # Nettoyage de la clé privée temporaire
       # ----------------------------------------------------
       - name: Supprimer la clé SSH temporaire
         if: always()
         shell: powershell
         run: |
-          $keyPath = "$env:USERPROFILE\.ssh\clienthub_deploy"
+          $keyPath = Join-Path $env:USERPROFILE ".ssh\clienthub_deploy"
 
-          if (Test-Path $keyPath) {
-            Remove-Item -Force $keyPath
+          if (Test-Path -LiteralPath $keyPath) {
+            Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue
+          }
+
+          if (Test-Path -LiteralPath $keyPath) {
+            Write-Host "La clé temporaire n'a pas pu être supprimée."
+          }
+          else {
             Write-Host "Clé SSH temporaire supprimée."
           }
