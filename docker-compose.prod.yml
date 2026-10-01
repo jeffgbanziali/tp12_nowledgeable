@@ -1,10 +1,10 @@
-name: clienthub
+name: clienthub-8013
 
 services:
   db:
     image: mysql:8.0
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
-    container_name: clienthub-db
+    container_name: gbanziali_jeff_db
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD manquant}
@@ -25,7 +25,7 @@ services:
 
   api:
     image: ${DOCKERHUB_USERNAME:?DOCKERHUB_USERNAME manquant}/clienthub-api:${IMAGE_TAG:-latest}
-    container_name: clienthub-api
+    container_name: gbanziali_jeff
     restart: unless-stopped
     environment:
       DB_HOST: db
@@ -34,23 +34,10 @@ services:
       DB_USER: clienthub_user
       DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD manquant}
     ports:
-      - "5000:5000"
+      - "${APP_PORT:-8013}:5000"
     depends_on:
       db:
         condition: service_healthy
-    networks:
-      - clienthub-net
-
-  web:
-    image: nginx:alpine
-    container_name: clienthub-web
-    restart: unless-stopped
-    ports:
-      - "80:80"
-    volumes:
-      - ./site:/usr/share/nginx/html:ro
-    depends_on:
-      - api
     networks:
       - clienthub-net
 

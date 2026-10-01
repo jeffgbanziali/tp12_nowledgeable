@@ -73,13 +73,51 @@ jobs:
         run: docker compose down -v
 
   build-and-push:
-    name: 3 - Build et push Docker Hub
+    name: 3 - Build, vérification et push Docker Hub
     runs-on: ubuntu-latest
     needs: e2e-tests
+    env:
+      IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/clienthub-api
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
+
+      - name: Build de l'image (gardée en local)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./api
+          load: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+
+      - name: Lancer le conteneur et vérifier /health
+        run: |
+          docker network create smoke
+          docker run -d --name smoke-db --network smoke \
+            -e MYSQL_ROOT_PASSWORD=smoke -e MYSQL_DATABASE=clienthub \
+            -e MYSQL_USER=smoke -e MYSQL_PASSWORD=smoke mysql:8.0
+          for i in $(seq 1 40); do
+            docker exec smoke-db mysqladmin ping -h 127.0.0.1 -uroot -psmoke --silent && break
+            sleep 3
+          done
+          docker run -d --name smoke-api --network smoke -p 5000:5000 \
+            -e DB_HOST=smoke-db -e DB_NAME=clienthub \
+            -e DB_USER=smoke -e DB_PASSWORD=smoke \
+            $IMAGE:$GITHUB_SHA
+          for i in $(seq 1 20); do
+            if curl -fsS http://localhost:5000/health; then exit 0; fi
+            sleep 3
+          done
+          docker logs smoke-api
+          exit 1
+
+      - name: Nettoyer
+        if: always()
+        run: |
+          docker rm -f smoke-api smoke-db || true
+          docker network rm smoke || true
 
       - name: Connexion à Docker Hub
         uses: docker/login-action@v3
@@ -87,14 +125,8 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build et push (tags latest + sha du commit)
-        uses: docker/build-push-action@v6
-        with:
-          context: ./api
-          push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+      - name: Push (latest + sha du commit)
+        run: docker push --all-tags $IMAGE
 
   deploy:
     name: 4 - Déploiement sur la VM Azure
@@ -103,22 +135,24 @@ jobs:
     env:
       VM_HOST: ${{ secrets.VM_HOST }}
       VM_USER: ${{ secrets.VM_USER }}
+      SSHPASS: ${{ secrets.VM_PASSWORD }}
+      APP_PORT: "8013"
+      APP_DIR: clienthub-8013
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configurer SSH
-        env:
-          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+      - name: Configurer SSH (connexion par mot de passe)
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass
           install -m 700 -d ~/.ssh
-          printf '%s\n' "$VM_SSH_KEY" > ~/.ssh/id_deploy
-          chmod 600 ~/.ssh/id_deploy
           ssh-keyscan -H "$VM_HOST" >> ~/.ssh/known_hosts
           {
             echo "Host vm"
             echo "  HostName $VM_HOST"
             echo "  User $VM_USER"
-            echo "  IdentityFile ~/.ssh/id_deploy"
+            echo "  PubkeyAuthentication no"
+            echo "  PreferredAuthentications password"
           } > ~/.ssh/config
 
       - name: Préparer le fichier .env de production
@@ -130,29 +164,28 @@ jobs:
           {
             echo "DOCKERHUB_USERNAME=$DOCKERHUB_USERNAME"
             echo "IMAGE_TAG=$GITHUB_SHA"
+            echo "APP_PORT=$APP_PORT"
             echo "DB_PASSWORD=$DB_PASSWORD"
             echo "DB_ROOT_PASSWORD=$DB_ROOT_PASSWORD"
           } > .env.prod
 
       - name: Copier les fichiers de déploiement sur la VM
         run: |
-          ssh vm "mkdir -p clienthub"
-          scp docker-compose.prod.yml init.sql vm:clienthub/
-          scp -r site vm:clienthub/
-          scp .env.prod vm:clienthub/.env
-          ssh vm "chmod 600 clienthub/.env"
+          sshpass -e ssh vm "mkdir -p $APP_DIR"
+          sshpass -e scp docker-compose.prod.yml init.sql vm:$APP_DIR/
+          sshpass -e scp .env.prod vm:$APP_DIR/.env
+          sshpass -e ssh vm "chmod 600 $APP_DIR/.env"
 
       - name: Déployer (idempotent)
         run: |
-          ssh vm "set -e; cd clienthub; \
+          sshpass -e ssh vm "set -e; cd $APP_DIR; \
             docker compose -f docker-compose.prod.yml pull; \
-            docker compose -f docker-compose.prod.yml up -d --remove-orphans; \
-            docker image prune -f"
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans"
 
       - name: Vérifier l'application via l'IP publique
         run: |
-          curl -fsS --retry 30 --retry-delay 5 --retry-all-errors "http://$VM_HOST:5000/health"
+          curl -fsS --retry 30 --retry-delay 5 --retry-all-errors "http://$VM_HOST:$APP_PORT/health"
           echo
-          curl -fsS --retry 5 --retry-delay 3 --retry-all-errors "http://$VM_HOST:5000/clients"
+          curl -fsS --retry 5 --retry-delay 3 --retry-all-errors "http://$VM_HOST:$APP_PORT/who"
           echo
-          curl -fsS -o /dev/null -w "Page web : HTTP %{http_code}\n" --retry 5 --retry-delay 3 --retry-all-errors "http://$VM_HOST/"
+          curl -fsS --retry 5 --retry-delay 3 --retry-all-errors "http://$VM_HOST:$APP_PORT/clients"
