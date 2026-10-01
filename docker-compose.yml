@@ -2,7 +2,7 @@ services:
   db:
     image: mysql:8.0
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
-    container_name: clienthub-db
+    #container_name: clienthub-db
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
@@ -23,7 +23,7 @@ services:
 
   api:
     build: ./api
-    container_name: clienthub-api
+   # container_name: clienthub-api
     restart: unless-stopped
     environment:
       DB_HOST: db
@@ -41,7 +41,7 @@ services:
 
   web:
     image: nginx:alpine
-    container_name: clienthub-web
+   # container_name: clienthub-web
     restart: unless-stopped
     ports:
       - "8080:80"
