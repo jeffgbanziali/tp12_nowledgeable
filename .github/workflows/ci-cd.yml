@@ -26,29 +26,103 @@ jobs:
   # ========================================================
   # JOB 2 : Tests d'intégration / E2E
   # ========================================================
+  
   e2e-tests:
     name: 2 - Tests E2E
     runs-on: self-hosted
     needs: unit-tests
+
     steps:
       - uses: actions/checkout@v4
 
+      # ----------------------------------------------------
+      # Nettoyage préventif
+      # ----------------------------------------------------
       - name: Nettoyer les conteneurs existants
-        run: docker compose down -v
+        shell: powershell
+        run: |
+          docker compose down -v --remove-orphans
 
+      # ----------------------------------------------------
+      # Démarrage de MySQL + API + Web
+      # ----------------------------------------------------
       - name: Démarrer la stack de test
         run: docker compose up -d --build
 
-      - name: Exécuter les tests E2E
-        run: docker compose exec -T api python -m pytest -v -m integration
+      # ----------------------------------------------------
+      # Attendre que l'API soit disponible
+      # ----------------------------------------------------
+      - name: Vérifier que l'API est disponible
+        shell: powershell
+        run: |
+          $maxAttempts = 40
+          $attempt = 0
 
+          while ($attempt -lt $maxAttempts) {
+            $attempt++
+
+            try {
+              $response = Invoke-WebRequest `
+                -Uri "http://localhost:5000/health" `
+                -UseBasicParsing `
+                -TimeoutSec 5
+
+              if ($response.StatusCode -eq 200) {
+                Write-Host "API disponible."
+                exit 0
+              }
+            }
+            catch {
+              Write-Host "API pas encore disponible... tentative $attempt/$maxAttempts"
+            }
+
+            Start-Sleep -Seconds 3
+          }
+
+          Write-Host "L'API n'est pas disponible."
+          docker compose ps
+          docker compose logs
+
+          exit 1
+
+      # ----------------------------------------------------
+      # Installer les dépendances Python pour les tests
+      # ----------------------------------------------------
+      - name: Installer les dépendances de test
+        shell: powershell
+        working-directory: api
+        run: |
+          python -m pip install -r requirements.txt
+
+      # ----------------------------------------------------
+      # Tests E2E
+      # ----------------------------------------------------
+      - name: Exécuter les tests E2E
+        shell: powershell
+        working-directory: api
+        env:
+          API_URL: http://localhost:5000
+        run: |
+          python -m pytest -v -m integration
+
+      # ----------------------------------------------------
+      # Logs en cas d'erreur
+      # ----------------------------------------------------
       - name: Afficher les logs en cas d'erreur
         if: failure()
-        run: docker compose logs
+        run: |
+          docker compose ps
+          docker compose logs
 
+      # ----------------------------------------------------
+      # Nettoyage final
+      # ----------------------------------------------------
       - name: Arrêter et nettoyer la stack
         if: always()
-        run: docker compose down -v
+        run: |
+          docker compose down -v --remove-orphans
+  
+
 
   # ========================================================
   # JOB 3 : Build et Push sur Docker Hub
