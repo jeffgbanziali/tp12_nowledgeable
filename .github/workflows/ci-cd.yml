@@ -32,9 +32,9 @@ jobs:
     needs: unit-tests
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Nettoyer les conteneurs existants
-        run: docker compose down -v || true
+        run: docker compose down -v
 
       - name: Démarrer la stack de test
         run: docker compose up -d --build
