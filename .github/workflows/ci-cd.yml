@@ -8,184 +8,112 @@ env:
   IMAGE_NAME: clienthub-api
 
 jobs:
+  # ========================================================
+  # JOB 1 : Tests unitaires
+  # ========================================================
   unit-tests:
     name: 1 - Tests unitaires
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: api/requirements.txt
+      - name: Build image de test
+        run: docker build -t clienthub-api:test ./api
 
-      - name: Installer les dépendances
-        working-directory: api
-        run: pip install -r requirements.txt
+      - name: Lancer pytest (unitaires)
+        run: docker run --rm clienthub-api:test python -m pytest -v -m "not integration"
 
-      - name: Lancer les tests unitaires
-        working-directory: api
-        run: python -m pytest -v -m "not integration"
-
+  # ========================================================
+  # JOB 2 : Tests d'intégration / E2E
+  # ========================================================
   e2e-tests:
     name: 2 - Tests E2E
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: unit-tests
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: api/requirements.txt
-
-      - name: Démarrer la stack (db + api + web)
+      - name: Démarrer la stack de test
         run: docker compose up -d --build
 
-      - name: Attendre que l'API réponde
-        run: |
-          for i in $(seq 1 40); do
-            if curl -fsS http://localhost:5000/health; then exit 0; fi
-            sleep 3
-          done
-          echo "L'API ne répond pas"
-          docker compose logs
-          exit 1
+      - name: Exécuter les tests E2E
+        run: docker compose exec -T api python -m pytest -v -m integration
 
-      - name: Installer les dépendances
-        working-directory: api
-        run: pip install -r requirements.txt
-
-      - name: Lancer les tests E2E
-        working-directory: api
-        env:
-          API_URL: http://localhost:5000
-        run: python -m pytest -v -m integration
-
-      - name: Afficher les logs en cas d'échec
+      - name: Afficher les logs en cas d'erreur
         if: failure()
         run: docker compose logs
 
-      - name: Arrêter la stack
+      - name: Arrêter et nettoyer la stack
         if: always()
         run: docker compose down -v
 
+  # ========================================================
+  # JOB 3 : Build et Push sur Docker Hub
+  # ========================================================
   build-and-push:
-    name: 3 - Build, vérification et push Docker Hub
-    runs-on: ubuntu-latest
+    name: 3 - Build et push Docker Hub
+    runs-on: self-hosted
     needs: e2e-tests
     env:
       IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/clienthub-api
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build de l'image (gardée en local)
-        uses: docker/build-push-action@v6
-        with:
-          context: ./api
-          load: true
-          tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ github.sha }}
-
-      - name: Lancer le conteneur et vérifier /health
-        run: |
-          docker network create smoke
-          docker run -d --name smoke-db --network smoke \
-            -e MYSQL_ROOT_PASSWORD=smoke -e MYSQL_DATABASE=clienthub \
-            -e MYSQL_USER=smoke -e MYSQL_PASSWORD=smoke mysql:8.0
-          for i in $(seq 1 40); do
-            docker exec smoke-db mysqladmin ping -h 127.0.0.1 -uroot -psmoke --silent && break
-            sleep 3
-          done
-          docker run -d --name smoke-api --network smoke -p 5000:5000 \
-            -e DB_HOST=smoke-db -e DB_NAME=clienthub \
-            -e DB_USER=smoke -e DB_PASSWORD=smoke \
-            $IMAGE:$GITHUB_SHA
-          for i in $(seq 1 20); do
-            if curl -fsS http://localhost:5000/health; then exit 0; fi
-            sleep 3
-          done
-          docker logs smoke-api
-          exit 1
-
-      - name: Nettoyer
-        if: always()
-        run: |
-          docker rm -f smoke-api smoke-db || true
-          docker network rm smoke || true
-
-      - name: Connexion à Docker Hub
+      - name: Connexion Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Push (latest + sha du commit)
-        run: docker push --all-tags $IMAGE
+      - name: Build et Push de l'image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./api
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
 
+  # ========================================================
+  # JOB 4 : Déploiement sur la VM Azure
+  # ========================================================
   deploy:
-    name: 4 - Déploiement sur la VM Azure
-    runs-on: ubuntu-latest
+    name: 4 - Déploiement VM
+    runs-on: self-hosted
     needs: build-and-push
-    env:
-      VM_HOST: ${{ secrets.VM_HOST }}
-      VM_USER: ${{ secrets.VM_USER }}
-      SSHPASS: ${{ secrets.VM_PASSWORD }}
-      APP_PORT: "8013"
-      APP_DIR: clienthub-8013
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configurer SSH (connexion par mot de passe)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq sshpass
-          install -m 700 -d ~/.ssh
-          ssh-keyscan -H "$VM_HOST" >> ~/.ssh/known_hosts
-          {
-            echo "Host vm"
-            echo "  HostName $VM_HOST"
-            echo "  User $VM_USER"
-            echo "  PubkeyAuthentication no"
-            echo "  PreferredAuthentications password"
-          } > ~/.ssh/config
+      - name: Copie des fichiers de configuration sur la VM
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          password: ${{ secrets.VM_PASSWORD }}
+          source: "docker-compose.prod.yml,init.sql"
+          target: "clienthub-8013"
 
-      - name: Préparer le fichier .env de production
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          DB_ROOT_PASSWORD: ${{ secrets.DB_ROOT_PASSWORD }}
-        run: |
-          {
-            echo "DOCKERHUB_USERNAME=$DOCKERHUB_USERNAME"
-            echo "IMAGE_TAG=$GITHUB_SHA"
-            echo "APP_PORT=$APP_PORT"
-            echo "DB_PASSWORD=$DB_PASSWORD"
-            echo "DB_ROOT_PASSWORD=$DB_ROOT_PASSWORD"
-          } > .env.prod
-
-      - name: Copier les fichiers de déploiement sur la VM
-        run: |
-          sshpass -e ssh vm "mkdir -p $APP_DIR"
-          sshpass -e scp docker-compose.prod.yml init.sql vm:$APP_DIR/
-          sshpass -e scp .env.prod vm:$APP_DIR/.env
-          sshpass -e ssh vm "chmod 600 $APP_DIR/.env"
-
-      - name: Déployer (idempotent)
-        run: |
-          sshpass -e ssh vm "set -e; cd $APP_DIR; \
-            docker compose -f docker-compose.prod.yml pull; \
-            docker compose -f docker-compose.prod.yml up -d --remove-orphans"
-
-      - name: Vérifier l'application via l'IP publique
-        run: |
-          curl -fsS --retry 30 --retry-delay 5 --retry-all-errors "http://$VM_HOST:$APP_PORT/health"
-          echo
-          curl -fsS --retry 5 --retry-delay 3 --retry-all-errors "http://$VM_HOST:$APP_PORT/who"
-          echo
-          curl -fsS --retry 5 --retry-delay 3 --retry-all-errors "http://$VM_HOST:$APP_PORT/clients"
+      - name: Déploiement via SSH et vérification
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          password: ${{ secrets.VM_PASSWORD }}
+          envs: GITHUB_SHA
+          script: |
+            cd clienthub-8013
+            cat << 'EOF' > .env
+            DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
+            IMAGE_TAG=${GITHUB_SHA}
+            APP_PORT=8013
+            DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+            DB_ROOT_PASSWORD=${{ secrets.DB_ROOT_PASSWORD }}
+            EOF
+            chmod 600 .env
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+            
+            # Vérification des endpoints
+            curl -fsS --retry 10 --retry-delay 3 http://localhost:8013/health
+            curl -fsS http://localhost:8013/who
+            curl -fsS http://localhost:8013/clients
